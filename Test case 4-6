@@ -1,0 +1,190 @@
+# ============================================================
+# TEST CASES GROUP 2: ADMIN + FREEZING + MAINTENANCE TESTS
+# Includes:
+# 4) Admin upgrade + booking monitoring
+# 5) Freezing punishment
+# 6) Announcement + maintenance closure
+# ============================================================
+
+def reset_test_files():
+    for file_name in ["smart_campus_data.dat", "smart_campus_session.dat"]:
+        if os.path.exists(file_name):
+            os.remove(file_name)
+
+
+def prepare_group_2_data():
+    """
+    This prepares clean users and one booking so the admin tests have data.
+    """
+    reset_test_files()
+    system = BookingSystem()
+
+    system.register_user(UserRole.STUDENT, "3001", "Dana Student", "dana@student.com", "1234")
+    system.register_user(UserRole.STAFF, "4001", "Maryam Staff", "maryam@staff.com", "1234")
+    system.register_user(UserRole.ADMIN, "9009", "Admin User", "admin@campus.com", "1234")
+
+    system.validate_login("STU3001", "1234")
+    system.create_booking_after_payment(
+        "SR-A",
+        "09:00-10:00",
+        "2026-05-12",
+        UsageType.INTERNAL.value
+    )
+
+    return system
+
+
+def test_case_4(system):
+    """
+    TEST CASE 4: Admin Helping with Upgrade + Admin Monitoring
+
+    Scenario:
+    Admin logs in, upgrades Dana Student to PREMIUM, then checks booking
+    activity for 2026-05-12.
+
+    Functions tested:
+    validate_login(), upgrade_user_by_admin(), get_users(),
+    get_bookings_by_date()
+    """
+
+    print("\n--- TEST CASE 4: Admin Upgrade + Monitoring ---")
+
+    system.logout()
+    system.validate_login("ADM9009", "1234")
+
+    system.upgrade_user_by_admin("STU3001")
+    print("Dana access after admin upgrade:", system.get_users()["STU3001"].get_access_type().value)
+
+    bookings = system.get_bookings_by_date("2026-05-12")
+
+    print("Admin monitoring bookings on 2026-05-12:")
+    for booking_id, booking in bookings.items():
+        print(
+            booking_id,
+            "| User:", booking.get_user().get_name(),
+            "| Facility:", booking.get_facility().get_facility_name(),
+            "| Slot:", booking.get_slot(),
+            "| Cost:", booking.get_total_cost(), "AED"
+        )
+
+
+def test_case_5(system):
+    """
+    TEST CASE 5: Cancellation Penalty + Automatic Freezing
+
+    Scenario:
+    Dana creates and cancels three bookings on different dates. Each cancellation
+    decreases penalty credits. After the third cancellation, the system freezes
+    Dana automatically. A new booking attempt is then rejected.
+
+    Functions tested:
+    create_booking_after_payment(), cancel_booking(),
+    record_cancellation_violation(), auto_freeze_if_needed(),
+    get_penalty_credits(), get_status()
+    """
+
+    print("\n--- TEST CASE 5: Freezing Punishment ---")
+
+    system.logout()
+    system.validate_login("STU3001", "1234")
+
+    cancel_dates = ["2026-05-13", "2026-05-14", "2026-05-15"]
+
+    for index, cancel_date in enumerate(cancel_dates, start=1):
+        booking, receipt = system.create_booking_after_payment(
+            "SR-A",
+            "11:00-12:00",
+            cancel_date,
+            UsageType.INTERNAL.value
+        )
+
+        print("Created booking:", booking.get_booking_id())
+        system.cancel_booking(booking.get_booking_id())
+
+        print(
+            "Cancellation",
+            index,
+            "| Penalty credits:",
+            system.get_current_user().get_penalty_credits(),
+            "| Status:",
+            system.get_current_user().get_status().value
+        )
+
+    try:
+        system.create_booking_after_payment(
+            "SR-A",
+            "12:00-13:00",
+            "2026-05-18",
+            UsageType.INTERNAL.value
+        )
+    except PermissionError as error:
+        print("Frozen account booking correctly rejected:", error)
+
+
+def test_case_6(system):
+    """
+    TEST CASE 6: Admin Announcement + Maintenance Closure + Blocked Booking
+
+    Scenario:
+    Admin adds a maintenance announcement and closes Event Hall 1 from
+    09:00-10:00 on 2026-05-19. Maryam Staff logs in, sees the announcement,
+    and tries to book the closed slot. The system rejects the booking.
+
+    Functions tested:
+    add_announcement(), close_facility_slot(), get_announcements(),
+    get_available_slots(), create_booking_after_payment()
+    """
+
+    print("\n--- TEST CASE 6: Announcement + Maintenance Closure ---")
+
+    system.logout()
+    system.validate_login("ADM9009", "1234")
+
+    maintenance_date = "2026-05-19"
+
+    system.add_announcement(
+        "Maintenance notice: Event Hall 1 is unavailable from 09:00-10:00."
+    )
+
+    system.close_facility_slot(
+        "EH-1",
+        maintenance_date,
+        "09:00-10:00"
+    )
+
+    print("System announcements:")
+    for announcement in system.get_announcements():
+        print(announcement)
+
+    system.logout()
+    system.validate_login("STF4001", "1234")
+
+    print("Maryam sees announcement before booking:")
+    for announcement in system.get_announcements():
+        print(announcement)
+
+    facility = system.get_facility_catalog().get_facility("EH-1")
+    print("Available EventHall slots:", facility.get_available_slots(maintenance_date))
+
+    try:
+        system.create_booking_after_payment(
+            "EH-1",
+            "09:00-10:00",
+            maintenance_date,
+            UsageType.EXTERNAL.value
+        )
+    except ValueError as error:
+        print("Closed maintenance slot correctly rejected:", error)
+
+
+def run_test_group_2():
+    system = prepare_group_2_data()
+
+    test_case_4(system)
+    test_case_5(system)
+    test_case_6(system)
+
+    print("\n--- GROUP 2 TESTS COMPLETED ---")
+
+
+run_test_group_2()
