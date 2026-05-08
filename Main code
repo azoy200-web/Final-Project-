@@ -1,0 +1,1776 @@
+from enum import Enum
+import pickle
+import os
+from datetime import datetime, date
+
+
+class UserRole(Enum):
+    """
+    UserRole defines the three actors in the system.
+
+    Purpose:
+    - STUDENT users book student-access facilities.
+    - STAFF users book staff-access facilities.
+    - ADMIN users manage users, bookings, and facility availability.
+
+    Logical reason:
+    Using Enum prevents spelling mistakes like "student", "Student", or "STUDNT".
+    The system only accepts the exact role values defined here.
+    """
+    STUDENT = "STUDENT"
+    STAFF = "STAFF"
+    ADMIN = "ADMIN"
+
+
+class AccessType(Enum):
+    """
+    AccessType defines the user's permission level.
+
+    Purpose:
+    - STANDARD users have limited booking access.
+    - PREMIUM users have more booking access.
+
+    Logical reason:
+    The booking rules depend on whether the user is STANDARD or PREMIUM,
+    so this enum keeps the permission levels consistent across the whole system.
+    """
+    STANDARD = "STANDARD"
+    PREMIUM = "PREMIUM"
+
+
+class UserStatus(Enum):
+    """
+    UserStatus tracks whether a user is allowed to use the system.
+
+    Purpose:
+    - ACTIVE users can book normally.
+    - FROZEN users are blocked from booking.
+
+    Logical reason:
+    This supports the punishment rule where users can be frozen after violations.
+    """
+    ACTIVE = "ACTIVE"
+    FROZEN = "FROZEN"
+
+
+class BookingStatus(Enum):
+    """
+    BookingStatus tracks the current state of a booking.
+
+    Purpose:
+    - CONFIRMED means the booking is active.
+    - CANCELLED means the user cancelled it.
+    - NO_SHOW means the user missed it.
+
+    Logical reason:
+    Booking status is needed for reports, penalties, and freeing booked slots.
+    """
+    PENDING = "PENDING"
+    CONFIRMED = "CONFIRMED"
+    CANCELLED = "CANCELLED"
+    NO_SHOW = "NO_SHOW"
+
+
+class UsageType(Enum):
+    """
+    UsageType explains how a facility is being used.
+
+    Purpose:
+    - INTERNAL use can be free for EventHall.
+    - EXTERNAL use may require payment.
+
+    Logical reason:
+    EventHall cost depends on usage type, so this enum helps calculate fees correctly.
+    """
+    INTERNAL = "INTERNAL"
+    EXTERNAL = "EXTERNAL"
+
+
+class PaymentStatus(Enum):
+    """
+    PaymentStatus tracks the payment result.
+
+    Purpose:
+    - NOT_REQUIRED is used when the cost is 0.
+    - PAID is used after successful payment.
+    - REFUNDED is used when money is returned.
+
+    Logical reason:
+    The system needs payment status for receipts and proof of payment.
+    """
+    NOT_REQUIRED = "NOT_REQUIRED"
+    PENDING = "PENDING"
+    PAID = "PAID"
+    FAILED = "FAILED"
+    REFUNDED = "REFUNDED"
+
+
+class PaymentPurpose(Enum):
+    """
+    PaymentPurpose explains why the payment exists.
+
+    Purpose:
+    - BOOKING_FEE is for facility bookings.
+    - ACCESS_UPGRADE is for changing STANDARD to PREMIUM.
+
+    Logical reason:
+    Separating payment purposes makes reports and receipts clearer.
+    """
+    BOOKING_FEE = "BOOKING_FEE"
+    ACCESS_UPGRADE = "ACCESS_UPGRADE"
+
+
+class User:
+    """
+    User is the parent class for Student, Staff, and Administrator.
+
+    Purpose:
+    - Stores shared user information such as ID, name, email, password, role, access type, and status.
+    - Provides shared actions such as login, profile update, support contact, and access requests.
+
+    Logical reason:
+    Student, Staff, and Administrator share common data. Using inheritance avoids repeating the same attributes and methods in every child class.
+    """
+
+    def __init__(self, user_id, university_id, name, email, password, role):
+        # Validation protects the system from creating incomplete or invalid user objects.
+        if not user_id:
+            raise ValueError("User ID cannot be empty.")
+        if not university_id:
+            raise ValueError("University/work ID cannot be empty.")
+        if not name:
+            raise ValueError("Name cannot be empty.")
+        if "@" not in email:
+            raise ValueError("Invalid email format.")
+        if len(password) < 4:
+            raise ValueError("Password must be at least 4 characters.")
+
+        # Private attributes match UML encapsulation.
+        self.__user_id = user_id
+        self.__university_id = university_id
+        self.__name = name
+        self.__email = email
+        self.__password = password
+        self.__role = role
+
+        # Every new user starts with STANDARD access and ACTIVE status.
+        # This matches the business rule that upgrades happen later.
+        self.__access_type = AccessType.STANDARD
+        self.__status = UserStatus.ACTIVE
+
+        # Penalty credits start at 3.
+        # Each violation decreases this by 1, and 0 causes freezing.
+        self.__penalty_credits = 3
+
+    def get_user_id(self):
+        # Returns the user ID so the system can identify and search for a user.
+        return self.__user_id
+
+    def set_user_id(self, user_id):
+        # Updates user ID only after checking it is not empty.
+        if not user_id:
+            raise ValueError("User ID cannot be empty.")
+        self.__user_id = user_id
+
+    def get_university_id(self):
+        # Returns university or work ID for profile and ID generation tracking.
+        return self.__university_id
+
+    def set_university_id(self, university_id):
+        # Updates university/work ID and prevents empty IDs.
+        if not university_id:
+            raise ValueError("University/work ID cannot be empty.")
+        self.__university_id = university_id
+
+    def get_name(self):
+        # Returns the user's name for profile display, receipts, and booking summaries.
+        return self.__name
+
+    def set_name(self, name):
+        # Updates the name after validation.
+        if not name:
+            raise ValueError("Name cannot be empty.")
+        self.__name = name
+
+    def get_email(self):
+        # Returns email for support messages and user profile display.
+        return self.__email
+
+    def set_email(self, email):
+        # Updates email and checks that it looks like an email address.
+        if "@" not in email:
+            raise ValueError("Invalid email format.")
+        self.__email = email
+
+    def get_password(self):
+        # Returns password for login checking.
+        return self.__password
+
+    def set_password(self, password):
+        # Updates password while keeping a minimum length rule.
+        if len(password) < 4:
+            raise ValueError("Password must be at least 4 characters.")
+        self.__password = password
+
+    def get_role(self):
+        # Returns the role because access rules depend on Student, Staff, or Admin.
+        return self.__role
+
+    def set_role(self, role):
+        # Updates the role only if it is a valid UserRole enum.
+        if not isinstance(role, UserRole):
+            raise TypeError("role must be UserRole.")
+        self.__role = role
+
+    def get_access_type(self):
+        # Returns STANDARD or PREMIUM because booking permissions depend on it.
+        return self.__access_type
+
+    def set_access_type(self, access_type):
+        # Updates access type after checking it is a valid AccessType enum.
+        if not isinstance(access_type, AccessType):
+            raise TypeError("accessType must be AccessType.")
+        self.__access_type = access_type
+
+    def get_status(self):
+        # Returns ACTIVE or FROZEN. Frozen users cannot book.
+        return self.__status
+
+    def set_status(self, status):
+        # Updates account status and prevents invalid status values.
+        if not isinstance(status, UserStatus):
+            raise TypeError("status must be UserStatus.")
+        self.__status = status
+
+    def get_penalty_credits(self):
+        # Returns remaining penalty credits for admin monitoring and user display.
+        return self.__penalty_credits
+
+    def set_penalty_credits(self, penalty_credits):
+        # Updates penalty credits but prevents negative values.
+        if penalty_credits < 0:
+            raise ValueError("Penalty credits cannot be negative.")
+        self.__penalty_credits = penalty_credits
+
+    def decrease_penalty_credit(self):
+        # Decreases penalty credit after cancellation or no-show.
+        # This supports the rule that repeated violations can freeze the user.
+        if self.__penalty_credits > 0:
+            self.__penalty_credits -= 1
+
+    def reset_penalty_credits(self):
+        # Restores penalty credits and makes the user active again.
+        # This is used when admin unfreezes the account.
+        self.__penalty_credits = 3
+        self.__status = UserStatus.ACTIVE
+
+    def login(self, user_id, password):
+        # Checks if the entered login information matches this user.
+        # This function exists so BookingSystem can validate users without directly accessing private password data.
+        return self.__user_id == user_id and self.__password == password
+
+    def update_profile(self, name, email):
+        # Updates user profile using setters so validation still happens.
+        self.set_name(name)
+        self.set_email(email)
+
+    def request_access_upgrade(self):
+        # Represents a user asking to upgrade.
+        # The actual payment and access update happens inside BookingSystem.
+        return "Upgrade request submitted."
+
+    def request_access_downgrade(self):
+        # Allows user to downgrade back to STANDARD.
+        # Downgrade does not require payment in the business rules.
+        self.__access_type = AccessType.STANDARD
+
+    def contact_support(self, subject, message):
+        # Lets user send a support issue.
+        # The subject and message are required so support receives meaningful details.
+        if not subject or not message:
+            raise ValueError("Subject and message are required.")
+        return f"Support request submitted: {subject} - {message}"
+
+# RELATIONSHIP EVIDENCE: Student inherits from User.
+# This shows inheritance because Student reuses User attributes and methods.
+class Student(User):
+    """
+    Student is a child class of User.
+
+    Purpose:
+    - Represents student users.
+    - Stores student-specific bookings.
+    - Supports the business rules for student facility access.
+
+    Logical reason:
+    Students have different permissions from Staff and Admin, so they need their own child class while still sharing User data.
+    """
+
+    def __init__(self, user_id, university_id, name, email, password):
+        # super() calls the User constructor and sets role to STUDENT.
+        super().__init__(user_id, university_id, name, email, password, UserRole.STUDENT)
+        self.__student_bookings = {}
+
+    def get_student_bookings(self):
+        # Returns student booking records for profile display or testing.
+        return self.__student_bookings
+
+    def set_student_bookings(self, student_bookings):
+        # Updates student bookings and checks the value is a dictionary.
+        if not isinstance(student_bookings, dict):
+            raise TypeError("studentBookings must be dictionary.")
+        self.__student_bookings = student_bookings
+
+    def view_student_bookings(self):
+        # Shows all bookings connected to this student.
+        return self.__student_bookings
+
+    def book_study_room(self):
+        # This represents the student's ability to book StudyRoom.
+        # Actual booking validation is handled in BookingSystem and AccessPolicy.
+        return "Student can book StudyRoom."
+
+    def book_sports_court(self):
+        # This represents the rule that only PREMIUM students can book SportsCourt.
+        # AccessPolicy enforces the real permission check.
+        return "Premium Student can book SportsCourt."
+
+    def book_event_hall(self):
+        # This represents the rule that only PREMIUM students can book EventHall.
+        # BookingSystem checks this before creating a booking.
+        return "Premium Student can book EventHall."
+
+# RELATIONSHIP EVIDENCE: Staff inherits from User.
+# This shows inheritance because Staff is a specialized type of User.
+class Staff(User):
+    """
+    Staff is a child class of User.
+
+    Purpose:
+    - Represents staff users.
+    - Stores staff-specific bookings.
+    - Supports staff booking permissions.
+
+    Logical reason:
+    Staff rules are different from student rules. Staff can book EventHall, and PREMIUM staff can book SportsCourt, but staff can never book StudyRoom.
+    """
+
+    def __init__(self, user_id, university_id, name, email, password):
+        # super() calls the User constructor and sets role to STAFF.
+        super().__init__(user_id, university_id, name, email, password, UserRole.STAFF)
+        self.__staff_bookings = {}
+
+    def get_staff_bookings(self):
+        # Returns staff booking records.
+        return self.__staff_bookings
+
+    def set_staff_bookings(self, staff_bookings):
+        # Updates staff bookings and ensures dictionary structure.
+        if not isinstance(staff_bookings, dict):
+            raise TypeError("staffBookings must be dictionary.")
+        self.__staff_bookings = staff_bookings
+
+    def view_staff_bookings(self):
+        # Displays staff bookings for profile or report use.
+        return self.__staff_bookings
+
+    def book_event_hall(self):
+        # Represents staff permission for EventHall.
+        # Standard and Premium staff can both book EventHall.
+        return "Staff can book EventHall."
+
+    def book_sports_court(self):
+        # Represents the rule that only PREMIUM staff can book SportsCourt.
+        return "Premium Staff can book SportsCourt."
+
+# RELATIONSHIP EVIDENCE: Administrator inherits from User.
+# This shows inheritance because Admin is also a User but has extra management functions.
+class Administrator(User):
+    """
+    Administrator is a child class of User.
+
+    Purpose:
+    - Manages users.
+    - Freezes or unfreezes accounts.
+    - Upgrades or downgrades access.
+    - Makes announcements.
+    - Opens or closes facility slots.
+
+    Logical reason:
+    Admin has management permissions that normal users should not have.
+    """
+
+    def __init__(self, user_id, university_id, name, email, password):
+        # super() calls the User constructor and sets role to ADMIN.
+        super().__init__(user_id, university_id, name, email, password, UserRole.ADMIN)
+        self.__admin_bookings_view = {}
+
+    def get_admin_bookings_view(self):
+        # Returns admin view of bookings.
+        return self.__admin_bookings_view
+
+    def set_admin_bookings_view(self, admin_bookings_view):
+        # Updates admin booking view and ensures dictionary structure.
+        if not isinstance(admin_bookings_view, dict):
+            raise TypeError("adminBookingsView must be dictionary.")
+        self.__admin_bookings_view = admin_bookings_view
+
+    def freeze_user(self, user):
+        # Freezes a user after violations.
+        # Frozen users cannot book facilities.
+        user.set_status(UserStatus.FROZEN)
+
+    def unfreeze_user(self, user):
+        # Unfreezes a user by resetting penalty credits and status.
+        user.reset_penalty_credits()
+
+    def upgrade_user_access(self, user):
+        # Admin can help users upgrade when needed.
+        user.set_access_type(AccessType.PREMIUM)
+
+    def downgrade_user_access(self, user):
+        # Admin can downgrade users back to STANDARD.
+        user.set_access_type(AccessType.STANDARD)
+
+    def make_announcement(self, announcements, message):
+        # Adds announcement with timestamp.
+        # Used for maintenance messages and system updates.
+        if not message:
+            raise ValueError("Announcement cannot be empty.")
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        announcements.append(f"{stamp}: {message}")
+
+    def close_facility_slot(self, facility, selected_date, slot):
+        # Admin closes a facility slot so users cannot book it.
+        # Used for maintenance or unavailable times.
+        facility.close_slot(selected_date, slot)
+
+    def open_facility_slot(self, facility, selected_date, slot):
+        # Admin reopens a previously closed slot.
+        facility.open_slot(selected_date, slot)
+
+
+class Facility:
+    """
+    Facility is the parent class for StudyRoom, SportsCourt, and EventHall.
+
+    Purpose:
+    - Stores shared facility information.
+    - Manages available, booked, and closed time slots.
+    - Calculates basic facility cost.
+
+    Logical reason:
+    All facility types share common data like location, capacity, slots, and price, so a parent class avoids repeated code.
+    """
+
+    def __init__(self, facility_id, facility_name, facility_type, location, capacity, price_per_hour, rules):
+        self.__facility_id = facility_id
+        self.__facility_name = facility_name
+        self.__facility_type = facility_type
+        self.__location = location
+        self.__capacity = capacity
+        self.__is_available = True
+        self.__price_per_hour = price_per_hour
+        self.__rules = rules
+
+        # Fixed slots are used so the GUI can show clear booking options.
+        self.__time_slots = [
+            "09:00-10:00",
+            "10:00-11:00",
+            "11:00-12:00",
+            "12:00-13:00",
+            "14:00-15:00",
+            "15:00-16:00"
+        ]
+
+        # booked_slots_by_date stores confirmed bookings per date.
+        # closed_slots_by_date stores admin closed slots per date.
+        self.__booked_slots_by_date = {}
+        self.__closed_slots_by_date = {}
+
+    def get_facility_id(self):
+        # Returns facility ID so the catalog can find this facility.
+        return self.__facility_id
+
+    def set_facility_id(self, facility_id):
+        # Updates facility ID.
+        self.__facility_id = facility_id
+
+    def get_facility_name(self):
+        # Returns facility name for GUI and booking summaries.
+        return self.__facility_name
+
+    def set_facility_name(self, facility_name):
+        # Updates displayed facility name.
+        self.__facility_name = facility_name
+
+    def get_facility_type(self):
+        # Returns facility type because access rules depend on it.
+        return self.__facility_type
+
+    def set_facility_type(self, facility_type):
+        # Updates facility type.
+        self.__facility_type = facility_type
+
+    def get_location(self):
+        # Returns facility location for user display.
+        return self.__location
+
+    def set_location(self, location):
+        # Updates facility location.
+        self.__location = location
+
+    def get_capacity(self):
+        # Returns maximum number of people allowed.
+        return self.__capacity
+
+    def set_capacity(self, capacity):
+        # Capacity must be positive because a facility cannot hold 0 or negative people.
+        if capacity <= 0:
+            raise ValueError("Capacity must be positive.")
+        self.__capacity = capacity
+
+    def get_is_available(self):
+        # Returns general facility availability.
+        return self.__is_available
+
+    def set_is_available(self, is_available):
+        # Opens or closes the whole facility.
+        self.__is_available = is_available
+
+    def get_price_per_hour(self):
+        # Returns the basic hourly price.
+        return self.__price_per_hour
+
+    def set_price_per_hour(self, price_per_hour):
+        # Price cannot be negative because cost must be valid.
+        if price_per_hour < 0:
+            raise ValueError("Price cannot be negative.")
+        self.__price_per_hour = price_per_hour
+
+    def get_rules(self):
+        # Returns facility rules to show users before booking.
+        return self.__rules
+
+    def set_rules(self, rules):
+        # Updates facility rules.
+        self.__rules = rules
+
+    def get_time_slots(self):
+        # Returns all possible time slots.
+        return self.__time_slots
+
+    def set_time_slots(self, time_slots):
+        # Updates available slot list if admin changes schedule.
+        self.__time_slots = time_slots
+
+    def get_booked_slots_by_date(self):
+        # Returns booked slots grouped by date.
+        return self.__booked_slots_by_date
+
+    def set_booked_slots_by_date(self, booked_slots_by_date):
+        # Used when repairing loaded pickle data.
+        self.__booked_slots_by_date = booked_slots_by_date
+
+    def get_closed_slots_by_date(self):
+        # Returns admin-closed slots grouped by date.
+        return self.__closed_slots_by_date
+
+    def set_closed_slots_by_date(self, closed_slots_by_date):
+        # Used when repairing old pickle data.
+        self.__closed_slots_by_date = closed_slots_by_date
+
+    def get_closed_slots(self, booking_date):
+        # Makes sure every date has a closed-slot list.
+        # This prevents key errors when checking closed slots.
+        if booking_date not in self.__closed_slots_by_date:
+            self.__closed_slots_by_date[booking_date] = []
+        return self.__closed_slots_by_date[booking_date]
+
+    def close_slot(self, booking_date, slot):
+        # Closes one specific slot for maintenance or admin reasons.
+        # Users cannot book slots in this closed list.
+        if slot not in self.__time_slots:
+            raise ValueError("Invalid time slot.")
+        if booking_date not in self.__closed_slots_by_date:
+            self.__closed_slots_by_date[booking_date] = []
+        if slot not in self.__closed_slots_by_date[booking_date]:
+            self.__closed_slots_by_date[booking_date].append(slot)
+
+    def open_slot(self, booking_date, slot):
+        # Reopens a closed slot so users can book it again.
+        if booking_date in self.__closed_slots_by_date:
+            if slot in self.__closed_slots_by_date[booking_date]:
+                self.__closed_slots_by_date[booking_date].remove(slot)
+
+    def get_available_slots(self, booking_date):
+        # Returns slots that are not booked and not closed.
+        # This is needed so users only see valid booking choices.
+        if booking_date not in self.__booked_slots_by_date:
+            self.__booked_slots_by_date[booking_date] = {}
+        if booking_date not in self.__closed_slots_by_date:
+            self.__closed_slots_by_date[booking_date] = []
+
+        booked = self.__booked_slots_by_date[booking_date]
+        closed = self.__closed_slots_by_date[booking_date]
+
+        return [
+            slot for slot in self.__time_slots
+            if slot not in booked and slot not in closed
+        ]
+
+    def book_slot(self, booking_date, slot, booking_id):
+        # Marks a slot as booked for a specific date.
+        # This prevents another user from taking the same slot.
+        if slot not in self.__time_slots:
+            raise ValueError("Invalid time slot.")
+        if booking_date not in self.__booked_slots_by_date:
+            self.__booked_slots_by_date[booking_date] = {}
+        if slot in self.__booked_slots_by_date[booking_date]:
+            raise ValueError("This slot is already booked.")
+        if slot in self.get_closed_slots(booking_date):
+            raise ValueError("This slot is closed by admin.")
+        self.__booked_slots_by_date[booking_date][slot] = booking_id
+
+    def release_slot(self, booking_date, slot):
+        # Frees a slot after cancellation or no-show.
+        # This allows another user to book it later.
+        if booking_date in self.__booked_slots_by_date:
+            if slot in self.__booked_slots_by_date[booking_date]:
+                del self.__booked_slots_by_date[booking_date][slot]
+
+    def calculate_cost(self, usage_type):
+        # Returns the normal price per hour.
+        # Child classes can override this for special pricing.
+        return self.__price_per_hour
+
+    def display_details(self):
+        # Returns a simple facility summary for GUI lists.
+        return f"{self.__facility_name} | {self.__location} | Capacity: {self.__capacity}"
+
+# RELATIONSHIP EVIDENCE: StudyRoom inherits from Facility.
+# This shows inheritance because StudyRoom uses common facility details from Facility.
+class StudyRoom(Facility):
+    """
+    StudyRoom represents a student-only facility.
+
+    Purpose:
+    - Allows students to book study spaces.
+    - Has no booking fee.
+
+    Logical reason:
+    Study rooms are restricted to students only, so this child class separates it from SportsCourt and EventHall.
+    """
+
+    def __init__(self, facility_id, room_code, location, capacity):
+        super().__init__(
+            facility_id,
+            f"Study Room {room_code}",
+            "STUDY_ROOM",
+            location,
+            capacity,
+            0,
+            "Rules: Students only. Keep the room clean. Arrive on time."
+        )
+        self.__room_code = room_code
+
+    def get_room_code(self):
+        # Returns room code such as A or B.
+        return self.__room_code
+
+    def set_room_code(self, room_code):
+        # Updates room code.
+        self.__room_code = room_code
+
+# RELATIONSHIP EVIDENCE: SportsCourt inherits from Facility.
+# This shows inheritance because SportsCourt is a specialized type of Facility.
+class SportsCourt(Facility):
+    """
+    SportsCourt represents sports facilities.
+
+    Purpose:
+    - Allows PREMIUM students and PREMIUM staff to book courts.
+    - Stores sport type and hourly price.
+
+    Logical reason:
+    SportsCourt has different access rules from StudyRoom and EventHall.
+    """
+
+    def __init__(self, facility_id, sport_type, location, capacity, price_per_hour):
+        super().__init__(
+            facility_id,
+            f"{sport_type} Court",
+            "SPORTS_COURT",
+            location,
+            capacity,
+            price_per_hour,
+            "Rules: Sports shoes required. Respect the booked time."
+        )
+        self.__sport_type = sport_type
+
+    def get_sport_type(self):
+        # Returns sport type such as Basketball or Tennis.
+        return self.__sport_type
+
+    def set_sport_type(self, sport_type):
+        # Updates sport type.
+        self.__sport_type = sport_type
+
+# RELATIONSHIP EVIDENCE: EventHall inherits from Facility.
+# This shows inheritance because EventHall shares facility data but overrides cost logic.
+class EventHall(Facility):
+    """
+    EventHall represents large event spaces.
+
+    Purpose:
+    - Allows staff to book halls.
+    - Allows PREMIUM students to book halls.
+    - Charges external use but keeps internal use free.
+
+    Logical reason:
+    EventHall has special payment logic, so it overrides calculate_cost().
+    """
+
+    def __init__(self, facility_id, location, capacity, external_rate):
+        super().__init__(
+            facility_id,
+            "Event Hall",
+            "EVENT_HALL",
+            location,
+            capacity,
+            external_rate,
+            "Rules: Internal use is free. External use requires payment."
+        )
+        self.__internal_use_free = True
+        self.__external_rate = external_rate
+
+    def get_internal_use_free(self):
+        # Returns whether internal use is free.
+        return self.__internal_use_free
+
+    def set_internal_use_free(self, internal_use_free):
+        # Updates internal use free rule.
+        self.__internal_use_free = internal_use_free
+
+    def get_external_rate(self):
+        # Returns price charged for external event hall use.
+        return self.__external_rate
+
+    def set_external_rate(self, external_rate):
+        # Updates external rate and parent price.
+        self.__external_rate = external_rate
+        self.set_price_per_hour(external_rate)
+
+    def calculate_cost(self, usage_type):
+        # Internal use is free based on business rules.
+        if usage_type == UsageType.INTERNAL.value:
+            return 0
+
+        # External use requires payment.
+        return self.__external_rate
+
+
+class TimeSlot:
+    """
+    TimeSlot represents a simple time period.
+
+    Purpose:
+    - Stores start and end time.
+    - Tracks if the slot is booked.
+
+    Logical reason:
+    This supports the UML TimeSlot class, but the current system mainly uses string slots like "10:00-11:00" inside Facility.
+    """
+
+    def __init__(self, slot_id, start_time, end_time):
+        self.__slot_id = slot_id
+        self.__start_time = start_time
+        self.__end_time = end_time
+        self.__is_booked = False
+
+    def get_slot_id(self):
+        # Returns slot ID.
+        return self.__slot_id
+
+    def set_slot_id(self, slot_id):
+        # Updates slot ID.
+        self.__slot_id = slot_id
+
+    def get_start_time(self):
+        # Returns slot start time.
+        return self.__start_time
+
+    def set_start_time(self, start_time):
+        # Updates slot start time.
+        self.__start_time = start_time
+
+    def get_end_time(self):
+        # Returns slot end time.
+        return self.__end_time
+
+    def set_end_time(self, end_time):
+        # Updates slot end time.
+        self.__end_time = end_time
+
+    def get_is_booked(self):
+        # Returns whether this TimeSlot object is booked.
+        return self.__is_booked
+
+    def set_is_booked(self, is_booked):
+        # Updates booking state for this TimeSlot.
+        self.__is_booked = is_booked
+
+
+class Booking:
+    """
+    Booking connects User, Facility, and selected slot.
+
+    Purpose:
+    - Stores reservation details.
+    - Tracks booking cost and status.
+    - Generates booking summaries.
+
+    Logical reason:
+    A booking is the main relationship object that proves a user reserved a facility at a specific time.
+    """
+
+    def __init__(self, booking_id, user, facility, slot, booking_date, usage_type, total_cost):
+        self.__booking_id = booking_id
+        # RELATIONSHIP EVIDENCE: Booking is associated with User.
+        # A Booking stores one User object, which proves each booking belongs to one user.
+        self.__user = user
+        # RELATIONSHIP EVIDENCE: Booking is associated with Facility.
+        # A Booking stores one Facility object, which proves each booking reserves one facility.
+        self.__facility = facility
+        # RELATIONSHIP EVIDENCE: Booking is associated with a time slot.
+        # The booking stores the selected slot string, so the reservation is tied to one time period.
+        self.__slot = slot
+        self.__booking_date = booking_date
+        self.__usage_type = usage_type
+        self.__total_cost = total_cost
+        self.__status = BookingStatus.CONFIRMED
+
+    def get_booking_id(self):
+        # Returns booking ID for searching, modifying, or cancelling.
+        return self.__booking_id
+
+    def get_user(self):
+        # Returns the user connected to this booking.
+        return self.__user
+
+    def get_facility(self):
+        # Returns the facility connected to this booking.
+        return self.__facility
+
+    def get_slot(self):
+        # Returns the booked time slot.
+        return self.__slot
+
+    def set_slot(self, slot):
+        # Updates the booking slot when a booking is modified.
+        self.__slot = slot
+
+    def get_booking_date(self):
+        # Returns booking date for reports and conflict checks.
+        return self.__booking_date
+
+    def set_booking_date(self, booking_date):
+        # Updates booking date when booking is modified.
+        self.__booking_date = booking_date
+
+    def get_usage_type(self):
+        # Returns internal or external usage type for cost rules.
+        return self.__usage_type
+
+    def get_total_cost(self):
+        # Returns total cost for payment and receipt.
+        return self.__total_cost
+
+    def get_status(self):
+        # Returns current booking status.
+        return self.__status
+
+    def set_status(self, status):
+        # Updates booking status.
+        self.__status = status
+
+    def cancel_booking(self):
+        # Marks booking as cancelled.
+        # BookingSystem also releases the facility slot and applies penalty.
+        self.__status = BookingStatus.CANCELLED
+
+    def mark_no_show(self):
+        # Marks booking as no-show.
+        # BookingSystem uses this to apply penalty credit loss.
+        self.__status = BookingStatus.NO_SHOW
+
+    def generate_booking_summary(self):
+        # Creates readable booking details for receipt, testing, and GUI display.
+        return (
+            f"Booking ID: {self.__booking_id}\n"
+            f"User: {self.__user.get_name()}\n"
+            f"Facility: {self.__facility.get_facility_name()}\n"
+            f"Facility Type: {self.__facility.get_facility_type()}\n"
+            f"Location: {self.__facility.get_location()}\n"
+            f"Date: {self.__booking_date}\n"
+            f"Time Slot: {self.__slot}\n"
+            f"Usage Type: {self.__usage_type}\n"
+            f"Cost: {self.__total_cost} AED\n"
+            f"Status: {self.__status.value}\n"
+            f"{self.__facility.get_rules()}"
+        )
+
+
+class Payment:
+    """
+    Payment represents payment for bookings or upgrades.
+
+    Purpose:
+    - Stores payment ID, amount, date, status, and purpose.
+    - Processes payments.
+
+    Logical reason:
+    Some bookings are free and some require payment, so the system needs a payment object to track the financial result.
+    """
+
+    def __init__(self, payment_id, amount, purpose):
+        self.__payment_id = payment_id
+        self.__amount = amount
+        self.__payment_date = str(date.today())
+        self.__status = PaymentStatus.PENDING if amount > 0 else PaymentStatus.NOT_REQUIRED
+        self.__purpose = purpose
+
+    def get_payment_id(self):
+        # Returns payment ID for receipt and payment records.
+        return self.__payment_id
+
+    def get_amount(self):
+        # Returns payment amount.
+        return self.__amount
+
+    def get_payment_date(self):
+        # Returns payment date.
+        return self.__payment_date
+
+    def get_status(self):
+        # Returns payment status.
+        return self.__status
+
+    def set_status(self, status):
+        # Updates payment status.
+        self.__status = status
+
+    def get_purpose(self):
+        # Returns whether payment is for booking fee or upgrade.
+        return self.__purpose
+
+    def process_payment(self):
+        # Processes payment.
+        # If amount is 0, payment is not required.
+        # If amount is more than 0, payment becomes PAID.
+        if self.__amount == 0:
+            self.__status = PaymentStatus.NOT_REQUIRED
+        else:
+            self.__status = PaymentStatus.PAID
+        return True
+
+
+class Receipt:
+    """
+    Receipt is proof of booking/payment.
+
+    Purpose:
+    - Combines booking and payment details.
+    - Generates receipt text.
+
+    Logical reason:
+    After booking and payment, the user needs evidence that the transaction was completed.
+    """
+
+    def __init__(self, receipt_id, booking, payment):
+        self.__receipt_id = receipt_id
+        # RELATIONSHIP EVIDENCE: Receipt is associated with Booking.
+        # Receipt stores the booking object so it can display booking details in the receipt.
+        self.__booking = booking
+        # RELATIONSHIP EVIDENCE: Receipt is connected to Payment.
+        # Receipt stores the payment object because receipt information depends on payment result.
+        self.__payment = payment
+        self.__issue_date = str(date.today())
+
+    def get_receipt_id(self):
+        # Returns receipt ID for storage and search.
+        return self.__receipt_id
+
+    def generate_receipt(self):
+        # Generates formatted receipt details for the user.
+        return (
+            "BOOKING RECEIPT\n"
+            "----------------------\n"
+            f"Receipt ID: {self.__receipt_id}\n"
+            f"Issue Date: {self.__issue_date}\n"
+            f"Payment Status: {self.__payment.get_status().value}\n"
+            f"Payment Amount: {self.__payment.get_amount()} AED\n\n"
+            f"{self.__booking.generate_booking_summary()}"
+        )
+
+
+class Notification:
+    """
+    Notification stores messages sent by the system.
+
+    Purpose:
+    - Stores booking confirmations.
+    - Stores freeze warnings.
+    - Stores maintenance or admin messages.
+
+    Logical reason:
+    Users need to be informed when important system actions happen.
+    """
+
+    def __init__(self, notification_id, message):
+        self.__notification_id = notification_id
+        self.__message = message
+        self.__send_date = str(date.today())
+        self.__is_read = False
+
+    def get_notification_id(self):
+        # Returns notification ID for storage.
+        return self.__notification_id
+
+    def get_message(self):
+        # Returns message text for GUI display.
+        return self.__message
+
+    def get_send_date(self):
+        # Returns notification date.
+        return self.__send_date
+
+    def get_is_read(self):
+        # Returns whether user has read the notification.
+        return self.__is_read
+
+    def mark_as_read(self):
+        # Marks notification as read after user views it.
+        self.__is_read = True
+
+
+class AccessPolicy:
+    """
+    AccessPolicy controls booking permission rules.
+
+    Purpose:
+    - Checks role.
+    - Checks access type.
+    - Checks facility type.
+
+    Logical reason:
+    Keeping permission rules in one class makes the system easier to update if business rules change.
+    """
+    # RELATIONSHIP EVIDENCE: AccessPolicy depends on User and Facility.
+    # This method receives user and facility as parameters to check if booking is allowed.
+    def can_book(self, user, facility):
+        # Get user and facility details needed for permission checking.
+        # RELATIONSHIP EVIDENCE: AccessPolicy depends on User.
+        # It reads user role and access type to apply permission rules.
+        role = user.get_role()
+        access = user.get_access_type()
+        # RELATIONSHIP EVIDENCE: AccessPolicy depends on Facility.
+        # It reads facility type to decide whether the user can book it.
+        facility_type = facility.get_facility_type()
+
+        # Admin manages the system but does not make normal facility bookings.
+        if role == UserRole.ADMIN:
+            return False
+
+        # StudyRoom is student-only.
+        if facility_type == "STUDY_ROOM":
+            return role == UserRole.STUDENT
+
+        # SportsCourt is only for PREMIUM students and PREMIUM staff.
+        if facility_type == "SPORTS_COURT":
+            return access == AccessType.PREMIUM and role in [UserRole.STUDENT, UserRole.STAFF]
+
+        # EventHall can be booked by all staff and PREMIUM students.
+        if facility_type == "EVENT_HALL":
+            if role == UserRole.STAFF:
+                return True
+            return role == UserRole.STUDENT and access == AccessType.PREMIUM
+
+        # Unknown facility types are rejected.
+        return False
+
+
+class FacilityCatalog:
+    """
+    FacilityCatalog stores all facility objects.
+
+    Purpose:
+    - Adds facilities.
+    - Removes facilities.
+    - Finds facilities by ID.
+
+    Logical reason:
+    BookingSystem needs one organized place to manage all facilities.
+    """
+
+    def __init__(self):
+        # RELATIONSHIP EVIDENCE: FacilityCatalog aggregates Facilities.
+        # The catalog stores many Facility objects using facility ID as the key.
+        self.__facilities = {}
+
+    def get_facilities(self):
+        # Returns the full facility dictionary.
+        return self.__facilities
+
+    def set_facilities(self, facilities):
+        # Replaces facility dictionary.
+        # Used when loading data from pickle.
+        self.__facilities = facilities
+
+    def add_facility(self, facility):
+        # Adds facility using its facility ID as the key.
+        # RELATIONSHIP EVIDENCE: FacilityCatalog aggregates Facilities.
+        # Adding a facility object into the catalog shows the catalog manages many facilities.
+        self.__facilities[facility.get_facility_id()] = facility
+
+    def remove_facility(self, facility_id):
+        # Removes facility if it exists.
+        if facility_id in self.__facilities:
+            del self.__facilities[facility_id]
+
+    def get_facility(self, facility_id):
+        # Returns one facility by ID.
+        return self.__facilities.get(facility_id)
+
+    def display_all_facilities(self):
+        # Returns all facilities for GUI display.
+        return self.__facilities
+
+
+class BookingSystem:
+    """
+    BookingSystem is the main controller class.
+
+    Purpose:
+    - Stores all users, bookings, payments, receipts, notifications, and announcements.
+    - Handles login, registration, booking, payment, penalties, upgrades, maintenance, and persistence.
+
+    Logical reason:
+    The system needs one central controller to connect all other classes together.
+    """
+
+    def __init__(self):
+        self.__system_name = "Smart Campus Facility Booking System"
+        self.__support_email = "support@campus.ae"
+        # RELATIONSHIP EVIDENCE: BookingSystem aggregates Users.
+        # Users are stored in a dictionary so the system can manage many user objects.
+        self.__users = {}
+        # RELATIONSHIP EVIDENCE: BookingSystem aggregates Bookings.
+        # Bookings are stored in a dictionary as system records.
+        self.__bookings = {}
+        # RELATIONSHIP EVIDENCE: BookingSystem aggregates Payments.
+        # Payments are stored separately so the system can keep financial records.
+        self.__payments = {}
+        # RELATIONSHIP EVIDENCE: BookingSystem aggregates Receipts.
+        # Receipts are stored separately as confirmation records.
+        self.__receipts = {}
+        # RELATIONSHIP EVIDENCE: BookingSystem aggregates Notifications.
+        # Notifications are stored so the system can keep user messages.
+        self.__notifications = {}
+        self.__announcements = []
+        # RELATIONSHIP EVIDENCE: BookingSystem composes FacilityCatalog.
+        # BookingSystem creates and owns the FacilityCatalog object.
+        self.__facility_catalog = FacilityCatalog()
+        # RELATIONSHIP EVIDENCE: BookingSystem composes AccessPolicy.
+        # BookingSystem creates AccessPolicy to control booking permissions.
+        self.__access_policy = AccessPolicy()
+        self.__data_file_name = "smart_campus_data.dat"
+        self.__session_file_name = "smart_campus_session.dat"
+        self.__current_user_id = ""
+        self.__remember_login = False
+        self.__next_booking_number = 1
+
+        # Load saved data so the system remembers users and bookings after closing.
+        self.load_data_from_file(self.__data_file_name)
+
+        # Repair old saved data if new attributes were added later.
+        self.repair_loaded_data()
+
+        # Create default facilities only if no facilities were loaded.
+        if not self.__facility_catalog.get_facilities():
+            self.create_default_facilities()
+
+        # Load saved login session if remember login was used.
+        self.load_session()
+
+    def get_system_name(self):
+        # Returns system name for GUI title or reports.
+        return self.__system_name
+
+    def get_support_email(self):
+        # Returns support email for contact/support section.
+        return self.__support_email
+
+    def get_users(self):
+        # Returns registered users.
+        return self.__users
+
+    def get_bookings(self):
+        # Returns all bookings.
+        return self.__bookings
+
+    def get_payments(self):
+        # Returns all payment records.
+        return self.__payments
+
+    def get_receipts(self):
+        # Returns all receipts.
+        return self.__receipts
+
+    def get_notifications(self):
+        # Returns all notifications.
+        return self.__notifications
+
+    def get_announcements(self):
+        # Returns system announcements.
+        return self.__announcements
+
+    def get_facility_catalog(self):
+        # Returns facility catalog object.
+        return self.__facility_catalog
+
+    def get_current_user_id(self):
+        # Returns the logged-in user ID.
+        return self.__current_user_id
+
+    def get_current_user(self):
+        # Returns the logged-in user object if one exists.
+        if self.__current_user_id in self.__users:
+            return self.__users[self.__current_user_id]
+        return None
+
+    def create_default_facilities(self):
+        # Creates built-in facilities so the system has ready booking options.
+        self.__facility_catalog.add_facility(StudyRoom("SR-A", "A", "Library - Floor 1", 6))
+        self.__facility_catalog.add_facility(StudyRoom("SR-B", "B", "Library - Floor 2", 4))
+        self.__facility_catalog.add_facility(SportsCourt("SC-B", "Basketball", "Sports Complex", 10, 20))
+        self.__facility_catalog.add_facility(SportsCourt("SC-T", "Tennis", "Sports Complex", 4, 15))
+        self.__facility_catalog.add_facility(EventHall("EH-1", "Main Building", 50, 100))
+        self.__facility_catalog.add_facility(EventHall("EH-2", "Conference Building", 100, 150))
+
+    def repair_loaded_data(self):
+        # Adds missing attributes to old pickle data.
+        # This prevents crashes when the code was updated after data was saved.
+        for user in self.__users.values():
+            if not hasattr(user, "_User__penalty_credits"):
+                user.set_penalty_credits(3)
+
+        for facility in self.__facility_catalog.get_facilities().values():
+            if not hasattr(facility, "_Facility__booked_slots_by_date"):
+                facility.set_booked_slots_by_date({})
+            if not hasattr(facility, "_Facility__closed_slots_by_date"):
+                facility.set_closed_slots_by_date({})
+
+    def save_data_to_file(self, file_name):
+        # Saves system data in a binary pickle file.
+        # This is required for persistence.
+        try:
+            with open(file_name, "wb") as file:
+                pickle.dump({
+                    "users": self.__users,
+                    "bookings": self.__bookings,
+                    "payments": self.__payments,
+                    "receipts": self.__receipts,
+                    "notifications": self.__notifications,
+                    "announcements": self.__announcements,
+                    "facility_catalog": self.__facility_catalog,
+                    "next_booking_number": self.__next_booking_number
+                }, file)
+            return True
+        except (pickle.PickleError, OSError) as error:
+            raise OSError(f"Saving failed: {error}")
+
+    def load_data_from_file(self, file_name):
+        # Loads system data from a binary pickle file.
+        # If the file is missing or corrupted, the system resets safely.
+        try:
+            if os.path.exists(file_name):
+                with open(file_name, "rb") as file:
+                    data = pickle.load(file)
+
+                self.__users = data.get("users", {})
+                self.__bookings = data.get("bookings", {})
+                self.__payments = data.get("payments", {})
+                self.__receipts = data.get("receipts", {})
+                self.__notifications = data.get("notifications", {})
+                self.__announcements = data.get("announcements", [])
+                self.__facility_catalog = data.get("facility_catalog", FacilityCatalog())
+                self.__next_booking_number = data.get("next_booking_number", 1)
+
+            return self
+        except (EOFError, pickle.UnpicklingError, OSError, AttributeError):
+            self.__users = {}
+            self.__bookings = {}
+            self.__payments = {}
+            self.__receipts = {}
+            self.__notifications = {}
+            self.__announcements = []
+            self.__facility_catalog = FacilityCatalog()
+            self.__next_booking_number = 1
+            return self
+
+    def save_session(self, user_id):
+        # Saves current login session using pickle.
+        # This supports remember-login functionality.
+        try:
+            with open(self.__session_file_name, "wb") as file:
+                pickle.dump({"current_user_id": user_id}, file)
+            return True
+        except OSError:
+            return False
+
+    def load_session(self):
+        # Loads saved login session if it exists.
+        try:
+            if os.path.exists(self.__session_file_name):
+                with open(self.__session_file_name, "rb") as file:
+                    data = pickle.load(file)
+
+                user_id = data.get("current_user_id", "")
+                if user_id in self.__users:
+                    self.__current_user_id = user_id
+                    return self.__users[user_id]
+            return None
+        except (EOFError, pickle.UnpicklingError, OSError, AttributeError):
+            return None
+
+    def logout(self):
+        # Clears current user and removes saved login session.
+        self.__current_user_id = ""
+        if os.path.exists(self.__session_file_name):
+            os.remove(self.__session_file_name)
+
+    def generate_user_id(self, role, university_id):
+        # Creates user ID using role prefix.
+        # This keeps user IDs consistent and easy to identify.
+        if role == UserRole.STUDENT:
+            return "STU" + university_id
+        if role == UserRole.STAFF:
+            return "STF" + university_id
+        if role == UserRole.ADMIN:
+            return "ADM" + university_id
+        raise ValueError("Invalid role.")
+
+    def register_user(self, role, university_id, name, email, password):
+        # Registers a user based on role.
+        # The function creates the correct child object automatically.
+        user_id = self.generate_user_id(role, university_id)
+
+        if user_id in self.__users:
+            raise ValueError("This account already exists.")
+        # RELATIONSHIP EVIDENCE: BookingSystem creates different User child objects.
+        # This shows polymorphism because the system creates Student, Staff, or Administrator based on role.
+        if role == UserRole.STUDENT:
+            user = Student(user_id, university_id, name, email, password)
+        elif role == UserRole.STAFF:
+            user = Staff(user_id, university_id, name, email, password)
+        elif role == UserRole.ADMIN:
+            user = Administrator(user_id, university_id, name, email, password)
+        else:
+            raise ValueError("Invalid role.")
+        # RELATIONSHIP EVIDENCE: BookingSystem aggregates User objects.
+        # The created user object is stored in the users dictionary.
+        self.__users[user_id] = user
+        self.save_data_to_file(self.__data_file_name)
+        return user
+
+    def validate_login(self, user_id, password, remember_login=False):
+        # Validates login and stores current user if successful.
+        if user_id not in self.__users:
+            raise ValueError(
+                "User ID not found.\n\n"
+                "Example:\n"
+                "Student 20240001 becomes STU20240001\n"
+                "Staff 8899 becomes STF8899\n"
+                "Admin 1000 becomes ADM1000"
+            )
+
+        user = self.__users[user_id]
+
+        if not user.login(user_id, password):
+            raise PermissionError("Incorrect password.")
+
+        self.__current_user_id = user_id
+        self.__remember_login = remember_login
+
+        if remember_login:
+            self.save_session(user_id)
+
+        return user
+
+    def validate_weekday_booking(self, selected_date):
+        # Stops weekend bookings.
+        # The system only allows Monday to Friday bookings.
+        booking_day = datetime.strptime(selected_date, "%Y-%m-%d").date()
+        if booking_day.weekday() >= 5:
+            raise ValueError("Bookings are only allowed from Monday to Friday.")
+        return True
+
+    def get_allowed_facilities(self, user):
+        # Returns only facilities that the user is allowed to book.
+        # This helps the GUI show correct options.
+        allowed = {}
+        for facility_id, facility in self.__facility_catalog.get_facilities().items():
+            if facility.get_is_available() and self.__access_policy.can_book(user, facility):
+                allowed[facility_id] = facility
+        return allowed
+
+    def count_user_bookings_on_date(self, user, selected_date):
+        # Counts confirmed bookings for one user on one date.
+        # Used to enforce STANDARD daily booking credit.
+        count = 0
+        for booking in self.__bookings.values():
+            if (
+                booking.get_user().get_user_id() == user.get_user_id()
+                and booking.get_booking_date() == selected_date
+                and booking.get_status() == BookingStatus.CONFIRMED
+            ):
+                count += 1
+        return count
+
+    def count_user_facility_type_bookings_on_date(self, user, facility_type, selected_date):
+        # Counts confirmed bookings for one user and one facility type on a date.
+        # Used to enforce PREMIUM limit of 3 bookings per facility type per day.
+        count = 0
+        for booking in self.__bookings.values():
+            if (
+                booking.get_user().get_user_id() == user.get_user_id()
+                and booking.get_facility().get_facility_type() == facility_type
+                and booking.get_booking_date() == selected_date
+                and booking.get_status() == BookingStatus.CONFIRMED
+            ):
+                count += 1
+        return count
+
+    def get_daily_credit_text(self, user, selected_date=None):
+        # Creates readable credit text for GUI display.
+        if selected_date is None:
+            selected_date = str(date.today())
+
+        if user.get_access_type() == AccessType.STANDARD:
+            used = self.count_user_bookings_on_date(user, selected_date)
+            return f"Booking Credit: {max(0, 1 - used)} / 1 | Penalty Credit: {user.get_penalty_credits()} / 3"
+
+        allowed_types = set()
+        for facility in self.get_allowed_facilities(user).values():
+            allowed_types.add(facility.get_facility_type())
+
+        credit_lines = []
+        for facility_type in allowed_types:
+            used = self.count_user_facility_type_bookings_on_date(user, facility_type, selected_date)
+            credit_lines.append(f"{facility_type}: {max(0, 3 - used)} / 3")
+
+        return " | ".join(credit_lines) + f" | Penalty Credit: {user.get_penalty_credits()} / 3"
+
+    def check_booking_credit(self, user, facility, selected_date):
+        # Enforces daily booking limits.
+        # STANDARD gets 1 booking per day.
+        # PREMIUM gets 3 bookings per facility type per day.
+        if user.get_access_type() == AccessType.STANDARD:
+            if self.count_user_bookings_on_date(user, selected_date) >= 1:
+                raise PermissionError("STANDARD access allows only 1 booking per day.")
+
+        if user.get_access_type() == AccessType.PREMIUM:
+            used = self.count_user_facility_type_bookings_on_date(
+                user,
+                facility.get_facility_type(),
+                selected_date
+            )
+            if used >= 3:
+                raise PermissionError(
+                    f"PREMIUM access allows only 3 bookings per {facility.get_facility_type()} per day."
+                )
+
+    def check_booking_conflict(self, user, slot, selected_date):
+        # Checks if user already has a confirmed booking at the same date and time.
+        # This prevents double-booking conflict.
+        for booking in self.__bookings.values():
+            if (
+                booking.get_user().get_user_id() == user.get_user_id()
+                and booking.get_booking_date() == selected_date
+                and booking.get_slot() == slot
+                and booking.get_status() == BookingStatus.CONFIRMED
+            ):
+                return True
+        return False
+
+    def auto_freeze_if_needed(self, user):
+        # Automatically freezes users when penalty credits reach 0.
+        # Also creates a notification explaining why the account was frozen.
+        if user.get_penalty_credits() <= 0:
+            user.set_status(UserStatus.FROZEN)
+            notification_id = "N-FREEZE-" + user.get_user_id()
+            self.__notifications[notification_id] = Notification(
+                notification_id,
+                "Your account has been automatically frozen because you reached 3 violations."
+            )
+
+    def record_cancellation_violation(self, user):
+        # Records cancellation penalty.
+        # Each violation decreases penalty credit by 1.
+        user.decrease_penalty_credit()
+        self.auto_freeze_if_needed(user)
+        self.save_data_to_file(self.__data_file_name)
+
+    def record_no_show_violation(self, user):
+        # Records no-show penalty.
+        # This supports the punishment rule in the assignment.
+        user.decrease_penalty_credit()
+        self.auto_freeze_if_needed(user)
+        self.save_data_to_file(self.__data_file_name)
+
+    def create_booking_after_payment(self, facility_id, slot, selected_date, usage_type):
+        # Main booking creation function.
+        # It checks login user, permission, date, slot availability, conflicts, credit limit, payment, receipt, and notification.
+        user = self.get_current_user()
+        facility = self.__facility_catalog.get_facility(facility_id)
+
+        if user.get_status() == UserStatus.FROZEN:
+            raise PermissionError("Your account is FROZEN. You cannot book.")
+
+        if not facility.get_is_available():
+            raise PermissionError("Facility is unavailable.")
+
+        datetime.strptime(selected_date, "%Y-%m-%d")
+        self.validate_weekday_booking(selected_date)
+
+        if datetime.strptime(selected_date, "%Y-%m-%d").date() < date.today():
+            raise ValueError("Booking date cannot be in the past.")
+        # RELATIONSHIP EVIDENCE: BookingSystem uses AccessPolicy.
+        # The system calls AccessPolicy to check if the user is allowed to book this facility.
+        if not self.__access_policy.can_book(user, facility):
+            raise PermissionError("You cannot book this facility.")
+
+        if slot not in facility.get_available_slots(selected_date):
+            raise ValueError("This slot is already booked or closed.")
+
+        if self.check_booking_conflict(user, slot, selected_date):
+            raise ValueError("You already have a booking at this time.")
+
+        self.check_booking_credit(user, facility, selected_date)
+
+        total_cost = facility.calculate_cost(usage_type)
+
+        booking_id = "B" + str(self.__next_booking_number).zfill(4)
+        self.__next_booking_number += 1
+        # RELATIONSHIP EVIDENCE: BookingSystem creates a Booking linked to User and Facility.
+        # The booking object receives user and facility objects, proving both associations.
+        booking = Booking(booking_id, user, facility, slot, selected_date, usage_type, total_cost)
+        # RELATIONSHIP EVIDENCE: BookingSystem aggregates Booking objects.
+        # The booking is stored in the system booking dictionary.
+        self.__bookings[booking_id] = booking
+        # RELATIONSHIP EVIDENCE: Facility is associated with booked slots.
+        # The facility records the selected slot using booking ID, proving the booking affects facility availability.
+        facility.book_slot(selected_date, slot, booking_id)
+        # RELATIONSHIP EVIDENCE: BookingSystem creates Payment for Booking.
+        # The payment ID is based on the booking ID, showing payment is linked to the booking transac
+        payment = Payment("P" + booking_id, total_cost, PaymentPurpose.BOOKING_FEE)
+        payment.process_payment()
+        # RELATIONSHIP EVIDENCE: BookingSystem aggregates Payment objects.
+        # The payment object is stored as a system payment record.
+        self.__payments[payment.get_payment_id()] = payment
+        # RELATIONSHIP EVIDENCE: Receipt is connected to Booking and Payment.
+        # The receipt is created using both booking and payment objects.
+        receipt = Receipt("R" + booking_id, booking, payment)
+        # RELATIONSHIP EVIDENCE: BookingSystem aggregates Receipt objects.
+        # The receipt object is stored as a confirmation record.
+        self.__receipts[receipt.get_receipt_id()] = receipt
+        # RELATIONSHIP EVIDENCE: Booking can generate Notification.
+        # A booking confirmation notification is created using the booking ID.
+        notification = Notification("N" + booking_id, f"Booking {booking_id} confirmed.")
+        # RELATIONSHIP EVIDENCE: BookingSystem aggregates Notification objects.
+        # The notification is stored in the notification dictionary.
+        self.__notifications[notification.get_notification_id()] = notification
+
+        self.save_data_to_file(self.__data_file_name)
+        return booking, receipt
+
+    def cancel_booking(self, booking_id):
+        # Cancels a booking, releases the slot, and applies a cancellation penalty.
+        if booking_id not in self.__bookings:
+            raise ValueError("Booking not found.")
+
+        booking = self.__bookings[booking_id]
+
+        if booking.get_user().get_user_id() != self.__current_user_id:
+            raise PermissionError("You can only cancel your own booking.")
+
+        booking.get_facility().release_slot(booking.get_booking_date(), booking.get_slot())
+        booking.cancel_booking()
+        self.record_cancellation_violation(booking.get_user())
+        self.save_data_to_file(self.__data_file_name)
+
+    def modify_booking(self, booking_id, new_slot, new_date):
+        # Modifies a booking by changing the slot and date.
+        # The old slot is released and the new slot is booked.
+        if booking_id not in self.__bookings:
+            raise ValueError("Booking not found.")
+
+        booking = self.__bookings[booking_id]
+
+        if booking.get_user().get_user_id() != self.__current_user_id:
+            raise PermissionError("You can only modify your own booking.")
+
+        self.validate_weekday_booking(new_date)
+
+        facility = booking.get_facility()
+
+        if new_slot not in facility.get_available_slots(new_date):
+            raise ValueError("New slot is not available.")
+
+        datetime.strptime(new_date, "%Y-%m-%d")
+
+        facility.release_slot(booking.get_booking_date(), booking.get_slot())
+        booking.set_slot(new_slot)
+        booking.set_booking_date(new_date)
+        facility.book_slot(new_date, new_slot, booking_id)
+
+        self.save_data_to_file(self.__data_file_name)
+
+    def mark_booking_no_show(self, booking_id):
+        # Marks booking as no-show, releases the slot, and applies penalty.
+        if booking_id not in self.__bookings:
+            raise ValueError("Booking not found.")
+
+        booking = self.__bookings[booking_id]
+        user = booking.get_user()
+
+        booking.get_facility().release_slot(booking.get_booking_date(), booking.get_slot())
+        booking.mark_no_show()
+
+        self.record_no_show_violation(user)
+        self.save_data_to_file(self.__data_file_name)
+
+    def process_upgrade_payment(self):
+        # Processes STANDARD to PREMIUM upgrade.
+        # User pays upgrade fee, then access changes to PREMIUM.
+        user = self.get_current_user()
+
+        if user.get_access_type() == AccessType.PREMIUM:
+            raise ValueError("User already has PREMIUM access.")
+
+        payment = Payment("P-UP-" + user.get_user_id(), 30, PaymentPurpose.ACCESS_UPGRADE)
+        payment.process_payment()
+        self.__payments[payment.get_payment_id()] = payment
+
+        user.set_access_type(AccessType.PREMIUM)
+        self.save_data_to_file(self.__data_file_name)
+
+    def downgrade_current_user(self):
+        # Downgrades the logged-in user to STANDARD.
+        user = self.get_current_user()
+        user.set_access_type(AccessType.STANDARD)
+        self.save_data_to_file(self.__data_file_name)
+
+    def freeze_user(self, user_id):
+        # Freezes a selected user manually.
+        # Admin can use this after serious violations.
+        if user_id not in self.__users:
+            raise ValueError("User not found.")
+        admin = self.get_current_user()
+        if isinstance(admin, Administrator):
+            admin.freeze_user(self.__users[user_id])
+        else:
+            self.__users[user_id].set_status(UserStatus.FROZEN)
+        self.save_data_to_file(self.__data_file_name)
+
+    def unfreeze_user(self, user_id):
+        # Unfreezes selected user and resets penalty credits.
+        if user_id not in self.__users:
+            raise ValueError("User not found.")
+        admin = self.get_current_user()
+        if isinstance(admin, Administrator):
+            # RELATIONSHIP EVIDENCE: Admin manages User.
+            # The admin object freezes another user object, showing an admin-user management association.
+            admin.unfreeze_user(self.__users[user_id])
+        else:
+            self.__users[user_id].reset_penalty_credits()
+        self.save_data_to_file(self.__data_file_name)
+
+    def upgrade_user_by_admin(self, user_id):
+        # Admin upgrades any user to PREMIUM.
+        if user_id not in self.__users:
+            raise ValueError("User not found.")
+        admin = self.get_current_user()
+        if isinstance(admin, Administrator):
+            # RELATIONSHIP EVIDENCE: Admin manages User access.
+            # The admin object upgrades a selected user to Premium.
+            admin.upgrade_user_access(self.__users[user_id])
+        else:
+            self.__users[user_id].set_access_type(AccessType.PREMIUM)
+        self.save_data_to_file(self.__data_file_name)
+
+    def downgrade_user_by_admin(self, user_id):
+        # Admin downgrades any user to STANDARD.
+        if user_id not in self.__users:
+            raise ValueError("User not found.")
+        admin = self.get_current_user()
+        if isinstance(admin, Administrator):
+            admin.downgrade_user_access(self.__users[user_id])
+        else:
+            self.__users[user_id].set_access_type(AccessType.STANDARD)
+        self.save_data_to_file(self.__data_file_name)
+
+    def close_facility_slot(self, facility_id, selected_date, slot):
+        # Closes one facility slot for maintenance.
+        # Users cannot book this closed slot.
+        # RELATIONSHIP EVIDENCE: BookingSystem uses FacilityCatalog.
+        # The system asks the catalog to find the facility object by facility ID.
+        facility = self.__facility_catalog.get_facility(facility_id)
+        if facility is None:
+            raise ValueError("Facility not found.")
+
+        admin = self.get_current_user()
+        if isinstance(admin, Administrator):
+            admin.close_facility_slot(facility, selected_date, slot)
+        else:
+            facility.close_slot(selected_date, slot)
+
+        self.save_data_to_file(self.__data_file_name)
+
+    def open_facility_slot(self, facility_id, selected_date, slot):
+        # Opens a previously closed facility slot.
+        facility = self.__facility_catalog.get_facility(facility_id)
+        if facility is None:
+            raise ValueError("Facility not found.")
+
+        admin = self.get_current_user()
+        if isinstance(admin, Administrator):
+            admin.open_facility_slot(facility, selected_date, slot)
+        else:
+            facility.open_slot(selected_date, slot)
+
+        self.save_data_to_file(self.__data_file_name)
+
+    def add_announcement(self, message):
+        # Adds maintenance or system announcement.
+        # This supports the admin announcement test case.
+        admin = self.get_current_user()
+        if isinstance(admin, Administrator):
+            admin.make_announcement(self.__announcements, message)
+        else:
+            if not message:
+                raise ValueError("Announcement cannot be empty.")
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            self.__announcements.append(f"{stamp}: {message}")
+
+        self.save_data_to_file(self.__data_file_name)
+
+    def get_bookings_by_date(self, selected_date):
+        # Returns all bookings on a selected date.
+        # Admin uses this for monitoring daily booking activity.
+        return {
+            booking_id: booking
+            for booking_id, booking in self.__bookings.items()
+            if booking.get_booking_date() == selected_date
+        }
