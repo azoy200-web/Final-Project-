@@ -1,0 +1,154 @@
+# ============================================================
+# TEST CASES GROUP 1: USER + BOOKING + PAYMENT TESTS
+# Includes:
+# 1) Registration/Login/Upgrade/Downgrade
+# 2) Successful booking + failed Standard limit booking
+# 3) Paid booking + successful double booking
+# ============================================================
+
+def reset_test_files():
+    for file_name in ["smart_campus_data.dat", "smart_campus_session.dat"]:
+        if os.path.exists(file_name):
+            os.remove(file_name)
+
+
+def test_case_1(system):
+    """
+    TEST CASE 1: Registration, Login, Upgrade, Failed Upgrade, Downgrade
+
+    Scenario:
+    Dana Student creates an account, logs in successfully, upgrades from STANDARD
+    to PREMIUM, tries to upgrade again, then downgrades back to STANDARD.
+
+    Functions tested:
+    register_user(), validate_login(), process_upgrade_payment(),
+    downgrade_current_user()
+    """
+
+    print("\n--- TEST CASE 1: Registration/Login/Upgrade/Downgrade ---")
+
+    dana = system.register_user(UserRole.STUDENT, "3001", "Dana Student", "dana@student.com", "1234")
+    maryam = system.register_user(UserRole.STAFF, "4001", "Maryam Staff", "maryam@staff.com", "1234")
+    admin = system.register_user(UserRole.ADMIN, "9009", "Admin User", "admin@campus.com", "1234")
+
+    print("Created Student:", dana.get_user_id(), "| Access:", dana.get_access_type().value)
+    print("Created Staff:", maryam.get_user_id(), "| Access:", maryam.get_access_type().value)
+    print("Created Admin:", admin.get_user_id())
+
+    system.validate_login("STU3001", "1234")
+    print("Login successful for:", system.get_current_user().get_name())
+
+    system.process_upgrade_payment()
+    print("Upgrade successful. New access:", system.get_current_user().get_access_type().value)
+
+    try:
+        system.process_upgrade_payment()
+    except ValueError as error:
+        print("Failed upgrade correctly blocked:", error)
+
+    system.downgrade_current_user()
+    print("Downgrade successful. Current access:", system.get_current_user().get_access_type().value)
+
+
+def test_case_2(system):
+    """
+    TEST CASE 2: Successful Booking + Failed Booking Due to Standard Limit
+
+    Scenario:
+    Dana is a STANDARD Student. She books Study Room A successfully. Then she
+    attempts another Study Room booking on the same date. The system rejects
+    the second booking because STANDARD users only have 1 daily booking credit.
+
+    Functions tested:
+    create_booking_after_payment(), check_booking_credit(),
+    count_user_bookings_on_date(), get_daily_credit_text()
+    """
+
+    print("\n--- TEST CASE 2: Successful Booking + Failed Standard Limit ---")
+
+    system.validate_login("STU3001", "1234")
+
+    booking_date = "2026-05-11"
+
+    booking, receipt = system.create_booking_after_payment(
+        "SR-A",
+        "09:00-10:00",
+        booking_date,
+        UsageType.INTERNAL.value
+    )
+
+    print("Booking confirmed:", booking.get_booking_id())
+    print("Facility:", booking.get_facility().get_facility_name())
+    print("Cost:", booking.get_total_cost(), "AED")
+    print("Credit after booking:", system.get_daily_credit_text(system.get_current_user(), booking_date))
+
+    try:
+        system.create_booking_after_payment(
+            "SR-B",
+            "10:00-11:00",
+            booking_date,
+            UsageType.INTERNAL.value
+        )
+    except PermissionError as error:
+        print("Second booking correctly rejected:", error)
+
+
+def test_case_3(system):
+    """
+    TEST CASE 3: Paid Booking + Successful Double Booking
+
+    Scenario:
+    Maryam Staff logs in and upgrades to PREMIUM. She books Event Hall 1 for
+    EXTERNAL use, so the system calculates a payment. Then she books Sports
+    Court B on the same date but at a different time, so the system accepts it.
+
+    Functions tested:
+    process_upgrade_payment(), create_booking_after_payment(),
+    calculate_cost(), process_payment(), generate_receipt(),
+    check_booking_conflict()
+    """
+
+    print("\n--- TEST CASE 3: Paid Booking + Successful Double Booking ---")
+
+    system.logout()
+    system.validate_login("STF4001", "1234")
+
+    system.process_upgrade_payment()
+    print("Maryam upgraded to:", system.get_current_user().get_access_type().value)
+
+    booking_date = "2026-05-12"
+
+    hall_booking, hall_receipt = system.create_booking_after_payment(
+        "EH-1",
+        "09:00-10:00",
+        booking_date,
+        UsageType.EXTERNAL.value
+    )
+
+    print("Paid EventHall booking confirmed:", hall_booking.get_booking_id())
+    print("EventHall cost:", hall_booking.get_total_cost(), "AED")
+
+    court_booking, court_receipt = system.create_booking_after_payment(
+        "SC-B",
+        "10:00-11:00",
+        booking_date,
+        UsageType.INTERNAL.value
+    )
+
+    print("Second booking confirmed:", court_booking.get_booking_id())
+    print("SportsCourt cost:", court_booking.get_total_cost(), "AED")
+    print("Double booking accepted because slots are different.")
+
+
+def run_test_group_1():
+    reset_test_files()
+    system = BookingSystem()
+
+    test_case_1(system)
+    test_case_2(system)
+    test_case_3(system)
+
+    print("\n--- GROUP 1 TESTS COMPLETED ---")
+
+
+run_test_group_1()
